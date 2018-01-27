@@ -10,6 +10,8 @@ const status = require('statuses')
 const Stream = require('stream')
 const bytes = require('bytes')
 const zlib = require('zlib')
+const omit = require('lodash.omit')
+const iltorb = require('iltorb')
 
 /**
  * Encoding methods supported.
@@ -17,7 +19,19 @@ const zlib = require('zlib')
 
 const encodingMethods = {
   gzip: zlib.createGzip,
-  deflate: zlib.createDeflate
+  deflate: zlib.createDeflate,
+  br: iltorb.compressStream
+}
+
+const DEFAULT_BROTLI = {
+  mode: 0,
+  // according to https://blogs.akamai.com/2016/02/understanding-brotlis-potential.html , brotli:4
+  // is slightly faster than gzip with somewhat better compression; good default if we don't want to
+  // worry about compression runtime being slower than gzip
+  quality: 4,
+  lgwin: 22,
+  lgblock: 0,
+  disable_literal_context_modeling: false
 }
 
 /**
@@ -29,7 +43,7 @@ const encodingMethods = {
  */
 
 module.exports = (options = {}) => {
-  let { filter = compressible, threshold = 1024 } = options
+  let { filter = compressible, threshold = 1024, brotli = DEFAULT_BROTLI } = options
   if (typeof threshold === 'string') threshold = bytes(threshold)
 
   return async (ctx, next) => {
@@ -47,8 +61,11 @@ module.exports = (options = {}) => {
     // forced compression or implied
     if (!(ctx.compress === true || filter(ctx.response.type))) return
 
+    const encoding = brotli && ctx.acceptsEncodings('br', 'identity') === 'br' ?
+        'br' :
+        ctx.acceptsEncodings('gzip', 'deflate', 'identity');
+        
     // identity
-    const encoding = ctx.acceptsEncodings('gzip', 'deflate', 'identity')
     if (!encoding) ctx.throw(406, 'supported encodings: gzip, deflate, identity')
     if (encoding === 'identity') return
 
@@ -60,8 +77,12 @@ module.exports = (options = {}) => {
 
     ctx.set('Content-Encoding', encoding)
     ctx.res.removeHeader('Content-Length')
+    // take only required Options
+    const opts = encoding === 'br' ?
+      Object.assign({}, DEFAULT_BROTLI, typeof brotli === 'object'? brotli : {}) :
+      options
 
-    const stream = ctx.body = encodingMethods[encoding](options)
+    const stream = ctx.body = encodingMethods[encoding](opts)
 
     if (body instanceof Stream) {
       body.pipe(stream)
